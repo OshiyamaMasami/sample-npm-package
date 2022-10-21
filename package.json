@@ -1,5 +1,5 @@
 {
-  "name": "@OshiyamaMasami/sample-npm-package",
+  "name": "@oshiyamamasami/sample-npm-package",
   "version": "0.0.1",
   "description": "",
   "main": "dist/index.js",
