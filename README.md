@@ -1,1 +1,1 @@
-# sample-1020
+# sample-npm-package
