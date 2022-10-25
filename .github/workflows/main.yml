@@ -1,1 +1,135 @@
 
+name: GitHub Packages Publish
+
+on:
+  push:
+  # 対象ブランチ
+    branches:
+      - main
+
+jobs:
+  setup:
+    name: setup
+    # Ubuntu最新版環境で実行する
+    runs-on: ubuntu-latest
+
+    # ジョブに依存しているすべての下流のジョブから利用する
+    outputs:
+      version: ${{ steps.package-version.outputs.version }}
+      tag-name: v${{ steps.package-version.outputs.version }}
+
+    steps:
+        # すべてのタグとブランチのすべての履歴を取得
+      - name: checkout
+        uses: actions/checkout@v3
+      - name: setup-node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '14'
+          registry-url: "https://npm.pkg.github.com"
+
+      - name: set-package-version
+        id: package-version
+        # node -p 結果を出力 -e 渡した文字列をスクリプトとして実行
+        run: node -p -e '`::set-output name=version::${require("./package.json").version}`'
+
+  publish:
+    name: publish
+    # このジョブの実行前に正常に完了する必要があるジョブ
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v3
+      - name: setup-node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 14.x
+          registry-url: "https://npm.pkg.github.com"
+
+      # キャッシュ
+      - name: cache-node-modules
+        uses: actions/cache@v3
+        with:
+          # npm キャッシュファイルは Linux/macOS の `~/.npm` に保存される
+          path: ~/.npm
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-modules-
+            ${{ runner.os }}-node-
+            ${{ runner.os }}-
+      
+      # npm publish可能かのチェック
+      - name: check-publish
+        # npx can-npm-publish --verbose npm publish可能かのチェックリスト
+        # https://efcl.info/2018/06/21/can-npm-publish/
+        run: npx can-npm-publish --verbose
+        if: success()
+        env:
+          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+
+      # ビルド前処理
+      - name: check-packages-build
+        run: npx rimraf dist
+        if: success()
+        env:
+          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+    
+      # ビルドする
+      - name: packages-build
+        run: npx tsc -p tsconfig.json 
+        if: success()
+        env:
+          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+
+      # npm publishする
+      - name: publish
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+
+      # タグを作成する
+      - name: package-version-to-git-tag
+        uses: pkgdeps/git-tag-action@v2
+        with:
+          # 以下は魔法の呪文的なお決まり
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_repo: ${{ github.repository }}
+          version: ${{ needs.setup.outputs.version }}
+          git_commit_sha: ${{ github.sha }}
+          # タグ名
+          git_tag_prefix: "v"
+  
+  release-note:
+    # リリースノートを自動作成
+    name: release-note
+    needs: [setup, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v3
+      - name: setup-node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 14.x
+          registry-url: "https://npm.pkg.github.com"
+
+      # 前回のリースタグを取得するe
+      - name: get-previous-tag
+        id: pre-tag
+        run: |
+          echo "::set-output name=pre-tag::$(curl -H 'Accept: application/vnd.github.v3+json' -H 'Authorization: token ${{ secrets.GITHUB_TOKEN }}' https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r .tag_name)"
+
+      # 前回リリースからの差分をもとに、リリースノートの本文を生成する
+      - name: generate-release-note
+        id: release-note
+        run: |
+          echo "::set-output name=release-note::$(curl -X POST -H 'Accept: application/vnd.github.v3+json' -H 'Authorization: token ${{ secrets.GITHUB_TOKEN }}' https://api.github.com/repos/${{ github.repository }}/releases/generate-notes -d '{"tag_name":"${{ needs.setup.outputs.tag-name }}", "previous_tag_name":"${{ steps.pre-tag.outputs.pre-tag }}"}' | jq .body | sed 's/"//g')"
+
+      # タグを切り、リリースノートを作成する
+      - name: create-release
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -d "{ \"tag_name\": \"${{ needs.setup.outputs.tag-name }}\", \"name\": \"Release ${{ needs.setup.outputs.tag-name }}\", \"body\": \"${{ steps.release-note.outputs.release-note }}\"}" \
+            https://api.github.com/repos/${{ github.repository }}/releases
